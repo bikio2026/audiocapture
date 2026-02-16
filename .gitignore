@@ -1,0 +1,19 @@
+# Build artifacts
+build/
+.build/
+DerivedData/
+*.o
+*.d
+*.swp
+
+# Xcode
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# Test files
+test_*.swift
+check_*.swift
+test_minimal/
+
+# macOS
+.DS_Store
