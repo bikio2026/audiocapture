@@ -2,8 +2,9 @@ import SwiftUI
 import Combine
 
 enum RecordingMode: String, CaseIterable {
-    case audio = "Solo Audio"
-    case video = "Video + Audio"
+    case audio = "Audio"
+    case video = "Video"
+    case url = "URL"
 }
 
 enum AudioFormat: String, CaseIterable {
@@ -43,8 +44,26 @@ class RecordingState: ObservableObject {
     @Published var recordingMode: RecordingMode = .audio
     @Published var selectedAudioFormat: AudioFormat = .m4a
     @Published var selectedVideoFormat: VideoFormat = .mov
+    @Published var urlInput: String = ""
+    @Published var urlStatus: String?
+    @Published var timerEnabled = false
+    @Published var timerHours: Int = 0
+    @Published var timerMinutes: Int = 5
+    @Published var timerSeconds: Int = 0
     @Published var errorMessage: String?
     @Published var lastSavedURL: URL?
+
+    @Published var brewUpdateStatus: String?
+    @Published var brewUpdateError: String?
+    @Published var brewUpdateSuccessVersion: String?
+
+    var onTimerExpired: (() -> Void)?
+
+    var timerLimit: TimeInterval? {
+        guard timerEnabled else { return nil }
+        let total = TimeInterval(timerHours * 3600 + timerMinutes * 60 + timerSeconds)
+        return total > 0 ? total : nil
+    }
 
     private var timer: Timer?
 
@@ -52,7 +71,11 @@ class RecordingState: ObservableObject {
         recordingDuration = 0
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.recordingDuration += 0.1
+                guard let self = self else { return }
+                self.recordingDuration += 0.1
+                if let limit = self.timerLimit, self.recordingDuration >= limit {
+                    self.onTimerExpired?()
+                }
             }
         }
     }
@@ -60,6 +83,19 @@ class RecordingState: ObservableObject {
     func stopTimer() {
         timer?.invalidate()
         timer = nil
+    }
+
+    var remainingTime: String? {
+        guard let limit = timerLimit else { return nil }
+        let remaining = max(0, limit - recordingDuration)
+        let totalSeconds = Int(remaining)
+        let h = totalSeconds / 3600
+        let m = (totalSeconds % 3600) / 60
+        let s = totalSeconds % 60
+        if h > 0 {
+            return String(format: "-%d:%02d:%02d", h, m, s)
+        }
+        return String(format: "-%02d:%02d", m, s)
     }
 
     var formattedDuration: String {

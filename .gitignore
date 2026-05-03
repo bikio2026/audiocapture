@@ -13,6 +13,7 @@ DerivedData/
 # Test files
 test_*.swift
 check_*.swift
+test_minimal
 test_minimal/
 
 # macOS

@@ -4,6 +4,8 @@ struct MenuBarView: View {
     @EnvironmentObject var state: RecordingState
     @StateObject private var appEnumerator = AppEnumerator()
     @StateObject private var recorder = AudioRecorder()
+    @StateObject private var urlRecorder = URLRecorder()
+    @StateObject private var brewUpdater = BrewUpdater()
 
     var body: some View {
         VStack(spacing: 12) {
@@ -24,22 +26,66 @@ struct MenuBarView: View {
             // Source selector depends on mode
             if state.recordingMode == .audio {
                 audioModeView
-            } else {
+            } else if state.recordingMode == .video {
                 videoModeView
+            } else {
+                urlModeView
+            }
+
+            // Timer selector (not for URL mode — yt-dlp downloads aren't live)
+            if state.recordingMode != .url {
+                VStack(spacing: 6) {
+                    Toggle("Timer", isOn: $state.timerEnabled)
+                        .font(.caption)
+
+                    if state.timerEnabled {
+                        HStack(spacing: 2) {
+                            timerField(value: $state.timerHours, label: "h", max: 23)
+                            Text(":").font(.caption.monospacedDigit())
+                            timerField(value: $state.timerMinutes, label: "m", max: 59)
+                            Text(":").font(.caption.monospacedDigit())
+                            timerField(value: $state.timerSeconds, label: "s", max: 59)
+                        }
+                    }
+                }
             }
 
             Divider()
 
-            if state.isRecording {
-                RecordingIndicatorView(duration: state.formattedDuration)
+            if state.isRecording && state.recordingMode != .url {
+                HStack {
+                    RecordingIndicatorView(duration: state.formattedDuration)
+                    if let remaining = state.remainingTime {
+                        Spacer()
+                        Text(remaining)
+                            .font(.caption.monospacedDigit())
+                            .foregroundColor(.orange)
+                    }
+                }
             }
 
-            // Record/Stop button
+            if let status = state.urlStatus {
+                HStack(spacing: 4) {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                    Text(status)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            // Record/Stop/Download button
             Button(action: { toggleRecording() }) {
                 HStack {
-                    Image(systemName: state.isRecording ? "stop.circle.fill" : "record.circle")
-                        .foregroundColor(state.isRecording ? .red : .primary)
-                    Text(state.isRecording ? "Detener" : "Grabar")
+                    if state.recordingMode == .url {
+                        Image(systemName: state.isRecording ? "xmark.circle.fill" : "arrow.down.circle")
+                            .foregroundColor(state.isRecording ? .red : .primary)
+                        Text(state.isRecording ? "Cancelar" : "Descargar")
+                    } else {
+                        Image(systemName: state.isRecording ? "stop.circle.fill" : "record.circle")
+                            .foregroundColor(state.isRecording ? .red : .primary)
+                        Text(state.isRecording ? "Detener" : "Grabar")
+                    }
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -82,6 +128,7 @@ struct MenuBarView: View {
         }
         .onAppear {
             setupExternalStopHandler()
+            setupTimerExpiredHandler()
         }
     }
 
@@ -153,14 +200,120 @@ struct MenuBarView: View {
         }
     }
 
+    // MARK: - URL mode view
+
+    private var urlModeView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("URL de audio/video:")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            TextField("https://youtube.com/watch?v=...", text: $state.urlInput)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption)
+                .disabled(state.isRecording)
+
+            Text("YouTube, SoundCloud, y más. Descarga el audio sin reproducirlo.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
+            if URLRecorder.ytdlpPath() == nil {
+                HStack(spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                        .font(.caption)
+                    Text("yt-dlp no instalado. Ejecutá: brew install yt-dlp")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                }
+            }
+
+            Picker("Formato", selection: $state.selectedAudioFormat) {
+                ForEach(AudioFormat.allCases, id: \.self) { format in
+                    Text(format.rawValue).tag(format)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(state.isRecording)
+
+            Divider()
+
+            HStack(spacing: 6) {
+                Button(action: { runBrewUpdate() }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.caption)
+                        Text("Actualizar yt-dlp")
+                            .font(.caption)
+                    }
+                }
+                .buttonStyle(.borderless)
+                .disabled(state.brewUpdateStatus != nil || state.isRecording)
+
+                if let status = state.brewUpdateStatus {
+                    ProgressView().scaleEffect(0.5)
+                    Text(status)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                } else if let v = state.brewUpdateSuccessVersion {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.caption)
+                    Text("v\(v)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                } else if let err = state.brewUpdateError {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                        .font(.caption)
+                    Text(err)
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+            }
+        }
+    }
+
+    // MARK: - Timer field
+
+    private func timerField(value: Binding<Int>, label: String, max: Int) -> some View {
+        HStack(spacing: 1) {
+            TextField("0", text: Binding<String>(
+                get: { value.wrappedValue == 0 ? "" : "\(value.wrappedValue)" },
+                set: { text in
+                    if text.isEmpty {
+                        value.wrappedValue = 0
+                    } else if let n = Int(text) {
+                        value.wrappedValue = min(max, Swift.max(0, n))
+                    }
+                }
+            ))
+                .frame(width: 30)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption.monospacedDigit())
+                .multilineTextAlignment(.center)
+            Text(label)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
+
     // MARK: - Logic
 
     private var canRecord: Bool {
         if state.isRecording { return true }
-        if state.recordingMode == .audio {
+        switch state.recordingMode {
+        case .audio:
             return appEnumerator.selectedApp != nil
-        } else {
+        case .video:
             return appEnumerator.selectedWindow != nil
+        case .url:
+            return !state.urlInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
     }
 
@@ -180,16 +333,69 @@ struct MenuBarView: View {
         }
     }
 
+    private func setupTimerExpiredHandler() {
+        state.onTimerExpired = { [self] in
+            toggleRecording()
+        }
+    }
+
+    private func runBrewUpdate() {
+        Task {
+            state.brewUpdateError = nil
+            state.brewUpdateSuccessVersion = nil
+            state.brewUpdateStatus = "Iniciando..."
+            do {
+                let version = try await brewUpdater.update(onStatus: { status in
+                    Task { @MainActor in state.brewUpdateStatus = status }
+                })
+                state.brewUpdateStatus = nil
+                state.brewUpdateSuccessVersion = version
+            } catch {
+                state.brewUpdateStatus = nil
+                state.brewUpdateError = error.localizedDescription
+            }
+        }
+    }
+
     private func toggleRecording() {
         Task {
             if state.isRecording {
-                do {
-                    let url = try await recorder.stopRecording()
+                if state.recordingMode == .url {
+                    urlRecorder.cancel()
                     state.isRecording = false
-                    state.stopTimer()
+                    state.urlStatus = nil
+                    state.errorMessage = "Descarga cancelada"
+                } else {
+                    do {
+                        let url = try await recorder.stopRecording()
+                        state.isRecording = false
+                        state.stopTimer()
+                        state.lastSavedURL = url
+                        state.errorMessage = nil
+                    } catch {
+                        state.errorMessage = error.localizedDescription
+                    }
+                }
+            } else if state.recordingMode == .url {
+                state.lastSavedURL = nil
+                state.errorMessage = nil
+                state.isRecording = true
+                do {
+                    let url = try await urlRecorder.record(
+                        urlString: state.urlInput,
+                        format: state.selectedAudioFormat,
+                        onStatus: { status in
+                            Task { @MainActor in
+                                state.urlStatus = status
+                            }
+                        }
+                    )
+                    state.isRecording = false
+                    state.urlStatus = nil
                     state.lastSavedURL = url
-                    state.errorMessage = nil
                 } catch {
+                    state.isRecording = false
+                    state.urlStatus = nil
                     state.errorMessage = error.localizedDescription
                 }
             } else if state.recordingMode == .audio {
